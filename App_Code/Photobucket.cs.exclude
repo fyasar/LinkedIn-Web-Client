@@ -1,0 +1,1616 @@
+﻿// <copyright file="API.cs" company="Microsoft Corporation">
+// Copyright (c) 2008 All Right Reserved
+// </copyright>
+// <author>Michael S. Scherotter</author>
+// <email>mischero@microsoft.com</email>
+// <date>2008-09-26</date>
+// <summary>Photobucket API</summary>
+
+namespace Photobucket
+{
+    using System;
+    using System.Collections.Generic;
+    using System.IO;
+    using System.IO.IsolatedStorage;
+    using System.Linq;
+    using System.Net;
+    using System.Text;
+    using System.Threading;
+    using System.Windows.Browser;
+    using System.Xml.Linq;
+
+    /// <summary>
+    /// Result types
+    /// </summary>
+    public enum ResultType
+    {
+        /// <summary>
+        /// Search for Images
+        /// </summary>
+        Image,
+
+        /// <summary>
+        /// Search for Videos
+        /// </summary>
+        Video
+    }
+
+    /// <summary>
+    /// Photobucket API
+    /// </summary>
+    public class API
+    {
+        #region Constants
+        /// <summary>
+        /// MIME Boundary
+        /// </summary>
+        private const string Boundary = "--xYzZY";
+
+        /// <summary>
+        /// Content Disposition Format
+        /// </summary>
+        private const string ContentDispositionFormat = "content-disposition: form-data; name=\"{0}\"{1}{2}";
+
+        // const bool UseWebClient = true;
+        #endregion
+
+        #region Member Data
+        #endregion
+
+        #region Constructors
+        /// <summary>
+        /// Initializes a new instance of the API class.
+        /// </summary>
+        /// <exception cref="ArgumentException">if the DeveloperKey or PrivateKey is null or empty</exception>
+        public API() :
+            this(System.Windows.Application.Current.Resources["DeveloperKey"] as string, System.Windows.Application.Current.Resources["PrivateKey"] as string)
+        {
+        }
+
+        /// <summary>
+        /// Initializes a new instance of the API class
+        /// </summary>
+        /// <param name="developerKey">developer key</param>
+        /// <param name="privateKey">private key</param>
+        /// <exception cref="ArgumentException">if the DeveloperKey or PrivateKey is null or empty</exception>
+        public API(string developerKey, string privateKey)
+        {
+            if (string.IsNullOrEmpty(developerKey))
+            {
+                throw new ArgumentException("Developer Key cannot be null", developerKey);
+            }
+
+            if (string.IsNullOrEmpty(privateKey))
+            {
+                throw new ArgumentException("Private Key cannot be null", privateKey);
+            }
+
+            this.DeveloperKey = developerKey;
+            this.PrivateKey = privateKey;
+
+            var query = System.Windows.Browser.HtmlPage.Document.DocumentUri.Query;
+
+            if (!string.IsNullOrEmpty(query))
+            {
+                string[] parameters = query.Substring(1).Split(new char[] { '&' });
+
+                foreach (var param in parameters)
+                {
+                    var name = param.Split(new char[] { '=' })[0];
+                    var value = param.Split(new char[] { '=' })[1];
+
+                    if (name == "oauth_token")
+                    {
+                        this.OAuthToken = value;
+                    }
+                    else if (name == "status")
+                    {
+                        this.Status = value;
+                    }
+                }
+            }
+        }
+        #endregion
+
+        #region Properties
+        /// <summary>
+        /// Gets or sets the OAuth token secret stored in isolated storage
+        /// </summary>
+        public static string OAuthTokenSecret
+        {
+            get
+            {
+                var secret = IsolatedStorageSettings.ApplicationSettings["OAuth Token Secret"] as string;
+
+                return secret;
+            }
+
+            set
+            {
+                IsolatedStorageSettings.ApplicationSettings["OAuth Token Secret"] = value;
+            }
+        }
+
+        /// <summary>
+        /// Gets or sets Developer Key
+        /// </summary>
+        public string DeveloperKey { get; set; }
+
+        /// <summary>
+        /// Gets or sets Private Key
+        /// </summary>
+        public string PrivateKey { get; set; }
+
+        /// <summary>
+        /// Gets or sets OAuth Token
+        /// </summary>
+        public string OAuthToken { get; set; }
+
+        /// <summary>
+        /// Gets or sets Status
+        /// </summary>
+        public string Status { get; set; }
+
+        #endregion
+
+        #region Methods
+
+        /// <summary>
+        /// Get media tags for a user.
+        /// </summary>
+        /// <param name="identifier">user identifier to search for</param>
+        /// <param name="tagName">tag name to search for</param>
+        /// <param name="separate">separate tags</param>
+        /// <param name="page">page number</param>
+        /// <param name="perPage">results per page</param>
+        /// <param name="handler">the handler to call when the async request returns.</param>
+        public void GetMediaTagsForUser(
+            string identifier,
+            string tagName,
+            bool separate,
+            int page,
+            int perPage,
+            EventHandler<MediaTagsEventArgs> handler)
+        {
+            if (string.IsNullOrEmpty(identifier))
+            {
+                throw new ArgumentException("identifier should not be null or empty.", "identifier");
+            }
+
+            if (handler == null)
+            {
+                throw new ArgumentNullException("handler", "Event handler cannot be null.");
+            }
+
+            string part;
+
+            if (string.IsNullOrEmpty(tagName))
+            {
+                part = string.Format(System.Globalization.CultureInfo.InvariantCulture, "user/{0}/tag", identifier);
+            }
+            else
+            {
+                part = string.Format(System.Globalization.CultureInfo.InvariantCulture, "user/{0}/tag/{1}", identifier, tagName);
+            }
+
+            var parameters = new List<QueryParameter>();
+
+            parameters.Add(new QueryParameter("separate", separate));
+            parameters.Add(new QueryParameter("page", page));
+            parameters.Add(new QueryParameter("perPage", perPage));
+
+            var uri = this.GenerateUri(part, parameters, "GET");
+
+            WebClient client = new WebClient();
+
+            client.DownloadStringCompleted += new DownloadStringCompletedEventHandler(this.TagsReturned);
+
+            client.DownloadStringAsync(new Uri(uri), handler);
+        }
+
+        /// <summary>
+        /// Get the title of a media item
+        /// </summary>
+        /// <param name="identifier">full media URL</param>
+        /// <param name="handler">the handler to call when the method returns</param>
+        /// <exception cref="ArgumentNullException">if the identifier or handler are null</exception>
+        public void GetMediaTitle(Uri identifier, EventHandler<GetMediaTitleEventArgs> handler)
+        {
+            if (identifier == null)
+            {
+                throw new ArgumentNullException("identifier", "identifier cannot be null.");
+            }
+
+            if (handler == null)
+            {
+                throw new ArgumentNullException("handler", "Event handler cannot be null.");
+            }
+
+            // We double-encode the identifier because the Uri class decodes one level
+            string identifierString = Uri.EscapeDataString(Uri.EscapeDataString(identifier.ToString()));
+
+            var part = string.Format(System.Globalization.CultureInfo.InvariantCulture, "media/{0}/title", identifierString);
+
+            var encodedUri = this.GenerateUri(part, null, "GET");
+
+            Uri uri = new Uri(encodedUri, UriKind.Absolute);
+
+            WebClient client = new WebClient();
+
+            client.DownloadStringCompleted += new DownloadStringCompletedEventHandler(this.GetMediaTitleCompleted);
+
+            client.DownloadStringAsync(uri, handler);
+        }
+
+        /// <summary>
+        /// Upload media to a specific album
+        /// </summary>
+        /// <param name="type">The media type. Options are image, video, or base64.</param>
+        /// <param name="identifier">The album identifier.</param>
+        /// <param name="uploadFile">Media encoded with multipart/form-data.</param>
+        /// <param name="title">The searchable title to set on the media.</param>
+        /// <param name="description">The searchable description to set on the media.></param>
+        /// <param name="fileName">The file name to set on the media. If left blank the file name matches
+        /// the original name. Valid characters are letters, numbers, underscore (
+        /// _ ), hyphen (-), and space.</param>
+        /// <param name="scramble">Indicates if the filename should be scrambled. True or false.</param>
+        /// <param name="degrees">The degrees of rotation in 90 degree increments.</param>
+        /// <param name="size">Size to resize to.</param>
+        /// <param name="handler">the event handler to call when the response is returned (can be null).</param>
+        /// <exception cref="ArgumentNullException">if uploadFile is null.</exception>
+        public void UploadMediaToAlbum(
+            string type,
+            string identifier,
+            System.IO.Stream uploadFile,
+            string title,
+            string description,
+            string fileName,
+            bool? scramble,
+            int? degrees,
+            int? size,
+            EventHandler<UploadEventArgs> handler)
+        {
+            if (uploadFile == null)
+            {
+                throw new ArgumentNullException("uploadFile");
+            }
+
+            List<QueryParameter> parameters = new List<QueryParameter>();
+            parameters.Add(new QueryParameter("title", title));
+            parameters.Add(new QueryParameter("type", type));
+            //// parameters.Add(new QueryParameter("oauth_token", token));
+
+            //// parameters.Add(new QueryParameter("oauth_token_secret", OAuthTokenSecret));
+
+            Uri requestUri = new Uri(this.GenerateUri("album/" + identifier + "/upload", parameters, "POST", this.OAuthToken, OAuthTokenSecret));
+
+            Uri uploadUri = new Uri(requestUri, new Uri("upload", UriKind.Relative));
+
+            HttpWebRequest request = WebRequest.Create(uploadUri) as HttpWebRequest;
+            request.ContentType = "multipart/form-data; boundary=xYzZY";
+            request.Method = "POST";
+
+            UploadData data = new UploadData
+            {
+                Degrees = degrees,
+                Description = description,
+                FileName = fileName,
+                Handler = handler,
+                RequestUri = requestUri,
+                Scramble = scramble,
+                Size = size,
+                Title = title,
+                Type = type,
+                UploadFile = uploadFile,
+                WebRequest = request
+            };
+
+            request.BeginGetRequestStream(new AsyncCallback(this.GotRequestStreamForUploadMedia), data);
+        }
+
+        /// <summary>
+        /// Get a login request token to use during web authentication.
+        /// </summary>
+        /// <param name="handler">the handler to call when returned</param>
+        public void LogOnTokenRequest(EventHandler<LogOnRequestEventArgs> handler)
+        {
+            string uri = this.GenerateUri("login/request", null, "POST");
+
+            HttpWebRequest request = WebRequest.Create(new Uri(uri)) as HttpWebRequest;
+
+            request.Method = "POST";
+
+            LoginTokenRequestState state = new LoginTokenRequestState
+            {
+                Request = request,
+                Handler = handler
+            };
+
+            request.BeginGetResponse(new AsyncCallback(this.LoginTokenResponse), state);
+        }
+
+        /// <summary>
+        /// Get the end-user access token and token secret for the request token.
+        /// </summary>
+        /// <param name="token">the oauth token</param>
+        /// <param name="handler">the event handler</param>
+        public void GetAccessToken(string token, EventHandler<AccessTokenEventArgs> handler)
+        {
+            if (string.IsNullOrEmpty(token))
+            {
+                throw new ArgumentException("token cannot be null or empty", "token");
+            }
+
+            if (handler == null)
+            {
+                throw new ArgumentNullException("handler", "handler cannot be null.");
+            }
+
+            string uri = this.GenerateUri("login/access", null, "POST", token, OAuthTokenSecret);
+
+            uri += "&oauth_token=" + token;
+
+            System.Diagnostics.Debug.WriteLine(uri);
+
+            HttpWebRequest request = WebRequest.Create(new Uri(uri)) as HttpWebRequest;
+
+            request.Method = "POST";
+
+            GetAccessTokenData data = new GetAccessTokenData
+            {
+                Request = request,
+                Handler = handler
+            };
+
+            IAsyncResult result = request.BeginGetResponse(new AsyncCallback(this.GetAccessTokenResponse), data);
+
+            if (result.CompletedSynchronously)
+            {
+                this.GetAccessTokenResponse(result);
+            }
+        }
+
+        /// <summary>
+        /// Add tag(s) to a media item.
+        /// </summary>
+        /// <remarks>User login required.</remarks>
+        /// <param name="identifier">Urlencoded full media URL.</param>
+        /// <param name="tag">String to add as the tag for the media. Maximum of 50 characters.</param>
+        /// <param name="topLeftX">Top left X coordinate, between 0 and 1 as fraction of image dimension.</param>
+        /// <param name="topLeftY">Top left Y coordinate, between 0 and 1 as fraction of image dimension.</param>
+        /// <param name="bottomRightX">Bottom right X coordinate, between 0 and 1 as fraction of image dimension.</param>
+        /// <param name="bottomRightY">Bottom right Y coordinate, between 0 and 1 as fraction of image dimension.</param>
+        /// <param name="contact">Optional contact ID to add in the tag, or specific email address.</param>
+        /// <param name="tagUrl">Optional URL to link to.</param>
+        public void AddMediaTag(
+            string identifier,
+            string tag,
+            float topLeftX,
+            float topLeftY,
+            float bottomRightX,
+            float bottomRightY,
+            string contact,
+            System.Uri tagUrl)
+        {
+            if (tag.Length > 50)
+            {
+                throw new ArgumentException("tag can be a maximum of 50 characters.", "tag");
+            }
+
+            if (topLeftX < 0.0 || topLeftX > 1.0)
+            {
+                throw new ArgumentOutOfRangeException("topLeftX", "topLeftX must be between 0 and 1.");
+            }
+
+            if (topLeftY < 0.0 || topLeftY > 1.0)
+            {
+                throw new ArgumentOutOfRangeException("topLeftY", "topLeftY must be between 0 and 1.");
+            }
+
+            if (bottomRightX < 0.0 || bottomRightX > 1.0)
+            {
+                throw new ArgumentOutOfRangeException("bottomRightX", "bottomRightX must be between 0 and 1.");
+            }
+
+            if (bottomRightY < 0.0 || bottomRightY > 1.0)
+            {
+                throw new ArgumentOutOfRangeException("bottomRightY", "bottomRightY must be between 0 and 1.");
+            }
+
+            string part = string.Format(System.Globalization.CultureInfo.InvariantCulture, "media/{0}/tag", identifier);
+
+            var parameters = new List<QueryParameter>();
+
+            parameters.Add(new QueryParameter("tag", tag));
+            parameters.Add(new QueryParameter("topleftx", topLeftX.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+            parameters.Add(new QueryParameter("toplefty", topLeftY.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+            parameters.Add(new QueryParameter("bottomrightx", bottomRightX.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+            parameters.Add(new QueryParameter("bottomrighty", bottomRightY.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+
+            if (!string.IsNullOrEmpty(contact))
+            {
+                parameters.Add(new QueryParameter("contact", contact));
+            }
+
+            if (tagUrl != null)
+            {
+                parameters.Add(new QueryParameter("tagurl", tagUrl));
+            }
+
+            string uri = this.GenerateUri(part, parameters, "POST");
+
+            HttpWebRequest request = WebRequest.Create(new Uri(uri)) as HttpWebRequest;
+
+            request.Method = "POST";
+            request.BeginGetResponse(new AsyncCallback(this.AddMediaTagResponse), request);
+        }
+
+        /// <summary>
+        /// Search for images or videos that match a specific search term or terms. If a search term is not specified, the
+        /// response contains the most recent updated media.
+        /// </summary>
+        /// <param name="identifier">Search term. If a search term is not entered, recent media is returned.</param>
+        /// <param name="number">Number of results to return (recent). Maximum of 200.</param>
+        /// <param name="perPage">Number of results to return for main search type. Maximum of 200.</param>
+        /// <param name="page">Page number to display (1 indexed).</param>
+        /// <param name="offset">Beginning offset of results.</param>
+        /// <param name="secondaryPerPage">Number of media to show, per page, for secondary search type.</param>
+        /// <param name="type">Type of results to get. Options are images or videos or [null] for both images and video.</param>
+        /// <param name="recentFirst">Show more recent images first.</param>
+        /// <param name="handler">Handler to call when asyc call completes successfully.</param>
+        /// <returns>The web client that is doing the search</returns>
+        /// <exception cref="System.Security.SecurityException">If called from a non-http page</exception>
+        /// <exception cref="ArgumentOutOfRangeException">If an argument is out of range.</exception>
+        public System.Net.WebClient Search(
+            string identifier,
+            int number,
+            int perPage,
+            int page,
+            int offset,
+            int secondaryPerPage,
+            ResultType type,
+            bool recentFirst,
+            EventHandler<SearchCompletedEventArgs> handler)
+        {
+            if (number <= 0 || number > 200)
+            {
+                throw new ArgumentOutOfRangeException("number", "number must be between 1 and 200.");
+            }
+
+            if (perPage <= 0 || perPage > 200)
+            {
+                throw new ArgumentOutOfRangeException("perPage", "perPage must be between 1 and 200.");
+            }
+
+            if (page <= 0)
+            {
+                throw new ArgumentOutOfRangeException("page", "page must be greater than 0.");
+            }
+
+            if (secondaryPerPage > 200)
+            {
+                throw new ArgumentOutOfRangeException("secondaryPerPage", "secondaryPerPage must be between 0 and 200.");
+            }
+
+            if (handler == null)
+            {
+                throw new ArgumentNullException("handler", "handler cannot be null.");
+            }
+
+            List<QueryParameter> parameters = new List<QueryParameter>();
+            parameters.Add(new QueryParameter("num", number));
+            parameters.Add(new QueryParameter("perpage", perPage));
+            parameters.Add(new QueryParameter("page", page));
+            parameters.Add(new QueryParameter("offset", offset));
+            parameters.Add(new QueryParameter("secondaryperpage", secondaryPerPage));
+
+            parameters.Add(new QueryParameter("recentfirst", recentFirst ? 1 : 0));
+
+            if (string.IsNullOrEmpty(identifier))
+            {
+                identifier = "-";
+            }
+            else
+            {
+                identifier = HttpUtility.UrlEncode(identifier);
+            }
+
+            // This will trigger an ignorable CA1308 Microsoft.Globalization code analysis warning.
+            string part = "search/" + identifier + "/" + type.ToString().ToLower(System.Globalization.CultureInfo.InvariantCulture);
+
+            Uri uri = new Uri(this.GenerateUri(part, parameters, "GET"));
+
+            System.Diagnostics.Debug.WriteLine(uri);
+
+            System.Net.WebClient client = this.SearchUsingWebClient(handler, uri);
+
+            return client;
+        }
+
+        /// <summary>
+        /// Search group albums for images or videos that match a specific 
+        /// search term or terms. If a search term is not specified, the 
+        /// response contains the most recent updated media.
+        /// </summary>
+        /// <param name="identifier">the identifier to search for</param>
+        /// <param name="number">number of results</param>
+        /// <param name="perPage">results per page</param>
+        /// <param name="page">page number</param>
+        /// <param name="offset">page offset</param>
+        /// <param name="secondaryPerPage">scondary results per page</param>
+        /// <param name="recentFirst">put most recent first</param>
+        /// <param name="handler">the event handler</param>
+        /// <returns>the web client</returns>
+        public System.Net.WebClient SearchGroupAlbums(
+            string identifier,
+            int number,
+            int perPage,
+            int page,
+            int offset,
+            int secondaryPerPage,
+            bool recentFirst,
+            EventHandler<SearchGroupAlbumsEventArgs> handler)
+        {
+            if (number <= 0 || number > 200)
+            {
+                throw new ArgumentOutOfRangeException("number", "number must be between 1 and 200.");
+            }
+
+            if (perPage <= 0 || perPage > 200)
+            {
+                throw new ArgumentOutOfRangeException("perPage", "perPage must be between 1 and 200.");
+            }
+
+            if (page <= 0)
+            {
+                throw new ArgumentOutOfRangeException("page", "page must be greater than 0.");
+            }
+
+            if (secondaryPerPage < 0 || secondaryPerPage > 200)
+            {
+                throw new ArgumentOutOfRangeException("secondaryPerPage", "secondaryPerPage must be between 0 and 200.");
+            }
+
+            if (handler == null)
+            {
+                throw new ArgumentNullException("handler", "handler cannot be null.");
+            }
+
+            List<QueryParameter> parameters = new List<QueryParameter>();
+            parameters.Add(new QueryParameter("num", number));
+            parameters.Add(new QueryParameter("perpage", perPage));
+            parameters.Add(new QueryParameter("page", page));
+            parameters.Add(new QueryParameter("offset", offset));
+            parameters.Add(new QueryParameter("secondaryperpage", secondaryPerPage));
+            parameters.Add(new QueryParameter("recentfirst", recentFirst.ToString()));
+
+            if (string.IsNullOrEmpty(identifier))
+            {
+                identifier = "-";
+            }
+
+            string part = "search/" + identifier + "/group";
+
+            Uri uri = new Uri(this.GenerateUri(part, parameters, "GET"));
+
+            System.Net.WebClient client = new System.Net.WebClient();
+
+            client.DownloadStringCompleted += new DownloadStringCompletedEventHandler(delegate(object sender, DownloadStringCompletedEventArgs args)
+            {
+                var doc = XDocument.Parse(args.Result);
+
+                var status = doc.Descendants("status").First();
+                var content = doc.Descendants("content").First();
+
+                var searchCompleted = new SearchGroupAlbumsEventArgs()
+                {
+                    StatusDescription = args.Error == null ? status.Value : args.Error.Message,
+                    Succeeded = args.Error == null,
+                    Groups = from media in content.Descendants("groups")
+                             select new Group
+                             {
+                                 Id = int.Parse(media.Element("id").Value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture),
+                                 Name = media.Element("name").Value,
+                                 Description = media.Element("description").Value,
+                                 Url = new Uri(media.Element("url").Value, UriKind.Absolute),
+                                 ThumbUrl = new Uri(media.Element("thumbUrl").Value, UriKind.Absolute),
+                                 Uploads = int.Parse(media.Element("numUploads").Value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture),
+                                 Users = int.Parse(media.Element("numUsers").Value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture),
+                             }
+                };
+
+                handler(this, searchCompleted);
+            });
+
+            client.DownloadStringAsync(uri);
+
+            return client;
+        }
+
+        /// <summary>
+        /// Get media featured by Photobucket.
+        /// </summary>
+        /// <param name="handler">Handler to call when asyc call completes successfully.</param>
+        /// <exception cref="System.Security.SecurityException">If called from a non-http page</exception>
+        public void GetFeaturedMedia(EventHandler<Photobucket.SearchCompletedEventArgs> handler)
+        {
+            string uri = this.GenerateUri("featured", null, "GET");
+
+            System.Net.WebClient client = new System.Net.WebClient();
+            client.DownloadStringCompleted += new DownloadStringCompletedEventHandler(this.SearchCompleted);
+            client.DownloadStringAsync(new Uri(uri), handler);
+        }
+
+        /// <summary>
+        /// Get media recently added by a specific user.
+        /// </summary>
+        /// <param name="identifier">User name.</param>
+        /// <param name="page">Page number to view; 1 indexed.</param>
+        /// <param name="perPage">Number of media per page. Maximum of 200.</param>
+        /// <param name="type">Filter media by type. Options are image, video, all.</param>
+        /// <param name="handler">Handler to call when asyc call completes successfully.</param>
+        /// <exception cref="System.Security.SecurityException">If called from a non-http page</exception>
+        public void GetRecentUserMedia(
+            string identifier,
+            int page,
+            int perPage,
+            string type,
+            EventHandler<Photobucket.MediaEventArgs> handler)
+        {
+            page = Math.Max(1, page);
+            perPage = Math.Max(1, perPage);
+            perPage = Math.Min(200, perPage);
+
+            if (string.IsNullOrEmpty(type))
+            {
+                type = "all";
+            }
+
+            List<QueryParameter> parameters = new List<QueryParameter>();
+
+            parameters.Add(new QueryParameter("page", page));
+            parameters.Add(new QueryParameter("perpage", perPage));
+            parameters.Add(new QueryParameter("type", type));
+
+            string uri = this.GenerateUri("user/" + identifier + "/search", parameters, "GET");
+
+            System.Net.WebClient client = new System.Net.WebClient();
+            client.DownloadStringCompleted += new DownloadStringCompletedEventHandler(this.GetRecentUserMediaCompleted);
+            client.DownloadStringAsync(new Uri(uri), handler);
+        }
+
+        /// <summary>
+        /// Ping Photobucket to see if the system is up or in maintenance mode.
+        /// </summary>
+        /// <param name="httpMethod">the HTTP 1.1 method (GET, PUT, POST, or DELETE)</param>
+        /// <param name="handler">the handler to call when the response returns (can be null)</param>
+        /// <exception cref="ArgumentException">if the method is not GET or POST.</exception>
+        public void Ping(string httpMethod, EventHandler<HttpWebResponseEventArgs> handler)
+        {
+            string[] methods = new string[] { "GET", "PUT", "POST", "DELETE" };
+
+            if (!methods.Contains(httpMethod.ToUpper(System.Globalization.CultureInfo.InvariantCulture)))
+            {
+                throw new ArgumentException("unsupported HTTP method " + httpMethod, "httpMethod");
+            }
+
+            string uri = string.Empty;
+
+            if (string.Compare(httpMethod, "POST2", StringComparison.OrdinalIgnoreCase) == 0)
+            {
+                uri = "http://api.photobucket.com/ping";
+            }
+            else
+            {
+                uri = this.GenerateUri("ping", null, httpMethod);
+            }
+
+            PingResponse response = new PingResponse
+            {
+                Request = WebRequest.Create(new Uri(uri)) as HttpWebRequest,
+                Handler = handler
+            };
+
+            response.Request.Method = httpMethod;
+
+            if (httpMethod == "POST")
+            {
+                response.Request.AllowReadStreamBuffering = true;
+                response.Request.ContentType = "text/xml";
+            }
+
+            IAsyncResult result2 = response.Request.BeginGetResponse(new AsyncCallback(this.Pong), response);
+
+            if (result2.CompletedSynchronously)
+            {
+                HttpWebResponseEventArgs args = new HttpWebResponseEventArgs();
+
+                args.Response = response.Request.EndGetResponse(result2) as HttpWebResponse;
+
+                handler(this, args);
+            }
+        }
+        #endregion
+
+        #region Static Implementation Methods
+        /// <summary>
+        /// Return the search results
+        /// </summary>
+        /// <param name="searchResultString">the xml result string</param>
+        /// <param name="error">the error returned</param>
+        /// <param name="handler">the return handler</param>
+        private static void ReturnSearchResults(string searchResultString, System.Exception error, EventHandler<SearchCompletedEventArgs> handler)
+        {
+            Photobucket.SearchCompletedEventArgs searchResult = null;
+
+            if (error == null)
+            {
+                System.Diagnostics.Debug.WriteLine(searchResultString);
+
+                var doc = XDocument.Parse(searchResultString);
+
+                var result = doc.Descendants("result").First();
+
+                var page = result.Attribute("page");
+                var perPage = result.Attribute("perpage");
+                var totalPages = result.Attribute("totalpages");
+                var totalResults = result.Attribute("totalresults");
+
+                searchResult = new Photobucket.SearchCompletedEventArgs
+                {
+                    Succeeded = true,
+                    Page = page == null ? 0 : int.Parse(page.Value, System.Globalization.CultureInfo.InvariantCulture),
+                    PerPage = perPage == null ? 0 : int.Parse(perPage.Value, System.Globalization.CultureInfo.InvariantCulture),
+                    TotalPages = totalPages == null ? 0 : long.Parse(totalPages.Value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture),
+                    TotalResults = totalResults == null ? 0 : long.Parse(totalResults.Value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture)
+                };
+
+                searchResult.PrimaryMedia = from media in doc.Descendants("primary").Descendants("media")
+                                            select new Photobucket.Media
+                                            {
+                                                DescriptionId = media.Attribute("description_id").Value,
+                                                Name = media.Attribute("name").Value,
+                                                Public = int.Parse(media.Attribute("public").Value, System.Globalization.CultureInfo.InvariantCulture),
+                                                MediaType = media.Attribute("type").Value,
+                                                UserName = media.Attribute("username").Value,
+                                                BrowseUrl = new Uri(media.Element("browseurl").Value),
+                                                Url = new Uri(media.Element("url").Value),
+                                                AlbumUrl = media.Element("albumurl") == null ? null : new Uri(media.Element("albumurl").Value),
+                                                Thumb = new Uri(media.Element("thumb").Value),
+                                                Description = media.Element("description").Value,
+                                                Title = media.Element("title").Value,
+                                                UploadDate = UnixTimeToDateTime(media.Attribute("uploaddate"))
+                                            };
+
+                searchResult.SecondaryMedia = from media in doc.Descendants("secondary").Descendants("media")
+                                              select new Photobucket.Media
+                                              {
+                                                  DescriptionId = media.Attribute("description_id").Value,
+                                                  Name = media.Attribute("name").Value,
+                                                  Public = int.Parse(media.Attribute("public").Value, System.Globalization.CultureInfo.InvariantCulture),
+                                                  MediaType = media.Attribute("type").Value,
+                                                  UserName = media.Attribute("username").Value,
+                                                  BrowseUrl = new Uri(media.Element("browseurl").Value),
+                                                  Url = new Uri(media.Element("url").Value),
+                                                  AlbumUrl = media.Element("albumurl") == null ? null : new Uri(media.Element("albumurl").Value),
+                                                  Thumb = new Uri(media.Element("thumb").Value),
+                                                  Description = media.Element("description").Value,
+                                                  Title = media.Element("title").Value,
+                                                  UploadDate = UnixTimeToDateTime(media.Attribute("uploaddate"))
+                                              };
+            }
+            else if (error is System.Security.SecurityException)
+            {
+                searchResult = new Photobucket.SearchCompletedEventArgs
+                {
+                    StatusDescription = "Security error accessing Photobuck service.",
+                    Succeeded = false
+                };
+            }
+            else
+            {
+                searchResult = new Photobucket.SearchCompletedEventArgs
+                {
+                    StatusDescription = error.Message,
+                    Succeeded = false
+                };
+
+                System.Diagnostics.Debug.WriteLine(error.Message);
+            }
+
+            handler(null, searchResult);
+        }
+
+        /// <summary>
+        /// Convert a UNIX time to a DateTime
+        /// </summary>
+        /// <param name="attribute">an attribute that has a UNIX time in it.</param>
+        /// <returns>a DateTime</returns>
+        private static DateTime UnixTimeToDateTime(XAttribute attribute)
+        {
+            if (attribute == null)
+            {
+                return DateTime.MinValue;
+            }
+
+            var strUnixTime = attribute.Value;
+
+            if (string.IsNullOrEmpty(strUnixTime))
+            {
+                return DateTime.MinValue;
+            }
+
+            long unixTime = long.Parse(strUnixTime, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture);
+
+            var startTime = new DateTime(1970, 1, 1, 0, 0, 0, 0);
+
+            return startTime.AddSeconds(unixTime);
+        }
+
+        /// <summary>
+        /// Copies data from a source stream to a target stream.</summary>
+        /// <param name="source">
+        /// The source stream to copy from.</param>
+        /// <param name="target">
+        /// The destination stream to copy to.</param>
+        private static void CopyStream(Stream source, Stream target)
+        {
+            const int BufSize = 0x1000;
+            byte[] buf = new byte[BufSize];
+            int bytesRead = 0;
+            while ((bytesRead = source.Read(buf, 0, BufSize)) > 0)
+            {
+                target.Write(buf, 0, bytesRead);
+            }
+        }
+
+        /// <summary>
+        /// Convert a UNIX time to a DateTime
+        /// </summary>
+        /// <param name="timeStamp">a UNIX TimeStamp</param>
+        /// <returns>a .Net DateTime</returns>
+        private static DateTime UnixTimeToDateTime(string timeStamp)
+        {
+            long seconds = long.Parse(timeStamp, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture);
+
+            return new DateTime(1970, 1, 1).AddSeconds(seconds);
+        }
+
+        /// <summary>
+        /// Generate the query paramters
+        /// </summary>
+        /// <param name="queryParameters">the list of query parameters</param>
+        /// <returns>a string with the query parameters</returns>
+        private static string GenerateQueryParameters(List<QueryParameter> queryParameters)
+        {
+            if (queryParameters == null || queryParameters.Count == 0)
+            {
+                return string.Empty;
+            }
+
+            queryParameters.Sort(new QueryParameterComparer());
+
+            bool first = true;
+
+            string queryParameterString = string.Empty;
+
+            foreach (var param in queryParameters)
+            {
+                if (first)
+                {
+                    queryParameterString += "?" + param.Name + "=" + param.Value;
+
+                    first = false;
+                }
+                else
+                {
+                    queryParameterString += "&" + param.Name + "=" + param.Value;
+                }
+            }
+
+            return queryParameterString;
+        }
+        #endregion
+
+        #region Implementation
+        /// <summary>
+        /// Ping response
+        /// </summary>
+        /// <param name="result">the async result</param>
+        private void Pong(IAsyncResult result)
+        {
+            PingResponse innerResponse = result.AsyncState as PingResponse;
+
+            if (innerResponse.Handler == null)
+            {
+                return;
+            }
+
+            HttpWebResponseEventArgs args = new HttpWebResponseEventArgs();
+
+            args.Response = innerResponse.Request.EndGetResponse(result) as HttpWebResponse;
+
+            innerResponse.Handler(this, args);
+
+            args.Response.Close();
+        }
+
+        /// <summary>
+        /// Called when the GetRecentUserMedia returns
+        /// </summary>
+        /// <param name="sender">web client for GetRecentUserMedia</param>
+        /// <param name="e">the download string completed event args</param>
+        private void GetRecentUserMediaCompleted(object sender, DownloadStringCompletedEventArgs e)
+        {
+            MediaEventArgs args = null;
+
+            if (e.Error == null)
+            {
+                System.Diagnostics.Debug.WriteLine(e.Result);
+
+                var doc = XDocument.Parse(e.Result);
+
+                var status = doc.Descendants("status").First();
+                var content = doc.Descendants("content").First();
+
+                args = new Photobucket.MediaEventArgs
+                {
+                    Succeeded = status.Value == "OK",
+                    Page = int.Parse(content.Attribute("page").Value, System.Globalization.CultureInfo.InvariantCulture),
+                    PerPage = int.Parse(content.Attribute("perpage").Value, System.Globalization.CultureInfo.InvariantCulture),
+                    TotalPages = int.Parse(content.Attribute("totalpages").Value, System.Globalization.CultureInfo.InvariantCulture),
+                    UserName = content.Attribute("username").Value,
+                };
+
+                args.Content = from media in content.Descendants("media")
+                               select new Photobucket.Media
+                               {
+                                   DescriptionId = media.Attribute("description_id").Value,
+                                   Name = media.Attribute("name").Value,
+                                   Public = int.Parse(media.Attribute("public").Value, System.Globalization.CultureInfo.InvariantCulture),
+                                   MediaType = media.Attribute("type").Value,
+                                   UserName = media.Attribute("username").Value,
+                                   BrowseUrl = new Uri(media.Element("browseurl").Value),
+                                   Url = new Uri(media.Element("url").Value),
+                                   AlbumUrl = new Uri(media.Element("albumurl").Value),
+                                   Thumb = new Uri(media.Element("thumb").Value),
+                                   Description = media.Element("description").Value,
+                                   Title = media.Element("title").Value
+                               };
+            }
+            else
+            {
+                args = new Photobucket.MediaEventArgs
+                {
+                    Succeeded = false,
+                    StatusDescription = e.Error.Message
+                };
+            }
+
+            var handler = e.UserState as EventHandler<MediaEventArgs>;
+
+            handler(null, args);
+        }
+
+        /// <summary>
+        /// Generate a URI
+        /// </summary>
+        /// <param name="part">the URI directory</param>
+        /// <param name="queryParameters">the query paramters</param>
+        /// <param name="httpMethod">the HTTP methods</param>
+        /// <returns>a URI string</returns>
+        private string GenerateUri(string part, List<QueryParameter> queryParameters, string httpMethod)
+        {
+            return this.GenerateUri(part, queryParameters, httpMethod, string.Empty, string.Empty);
+        }
+
+        /// <summary>
+        /// Generate URI
+        /// </summary>
+        /// <param name="part">the directory part</param>
+        /// <param name="queryParameters">query paramters</param>
+        /// <param name="httpMethod">http method</param>
+        /// <param name="token">the OAuth token</param>
+        /// <param name="tokenSecret">the OAuth token secret</param>
+        /// <returns>a URI for the Photobucket REST API</returns>
+        private string GenerateUri(string part, List<QueryParameter> queryParameters, string httpMethod, string token, string tokenSecret)
+        {
+            string uriString = "http://api.photobucket.com/" + part;
+
+            uriString += GenerateQueryParameters(queryParameters);
+
+            Uri uri = new Uri(uriString);
+
+            OAuthBase oauth = new OAuthBase();
+
+            string nonce = oauth.GenerateNonce();
+            string timeStamp = oauth.GenerateTimestamp();
+
+            string signature = oauth.GenerateSignature(uri, this.DeveloperKey, this.PrivateKey, token, tokenSecret, httpMethod, timeStamp, nonce);
+
+            //// string plus = HttpUtility.UrlEncode("+");
+
+            //// signature = signature.Replace("+", plus);
+
+            signature = HttpUtility.UrlEncode(signature);
+
+            if (queryParameters == null)
+            {
+                queryParameters = new List<QueryParameter>();
+            }
+
+            queryParameters.Add(new QueryParameter("oauth_consumer_key", this.DeveloperKey));
+            queryParameters.Add(new QueryParameter("oauth_nonce", nonce));
+            queryParameters.Add(new QueryParameter("oauth_timestamp", timeStamp));
+            queryParameters.Add(new QueryParameter("oauth_signature_method", "HMAC-SHA1"));
+            queryParameters.Add(new QueryParameter("oauth_version", "1.0"));
+            queryParameters.Add(new QueryParameter("oauth_signature", signature));
+            if (!string.IsNullOrEmpty(this.OAuthToken))
+            {
+                // queryParameters.Add(new QueryParameter("oauth_token", OAuthToken));
+            }
+
+            uriString = "http://api.photobucket.com/" + part + GenerateQueryParameters(queryParameters);
+
+            return uriString;
+        }
+
+        /// <summary>
+        /// Get the access token async response
+        /// </summary>
+        /// <param name="result">the async result</param>
+        private void GetAccessTokenResponse(IAsyncResult result)
+        {
+            GetAccessTokenData data = result.AsyncState as GetAccessTokenData;
+
+            HttpWebRequest request = data.Request;
+
+            HttpWebResponse response = request.EndGetResponse(result) as HttpWebResponse;
+
+            AccessTokenEventArgs args = new AccessTokenEventArgs();
+
+            if (response.StatusCode == HttpStatusCode.OK)
+            {
+                args.Succeeded = true;
+
+                using (var stream = response.GetResponseStream())
+                {
+                    using (var reader = new System.IO.StreamReader(stream))
+                    {
+                        string accessTokenResponse = reader.ReadToEnd();
+
+                        string[] parameters = accessTokenResponse.Split('&');
+
+                        System.Diagnostics.Debug.WriteLine(accessTokenResponse);
+
+                        foreach (var param in parameters)
+                        {
+                            var keyAndValue = param.Split('=');
+                            switch (keyAndValue[0])
+                            {
+                                case "oauth_token":
+                                    args.OAuthToken = keyAndValue[1];
+                                    break;
+
+                                case "oauth_token_secret":
+                                    args.OAuthTokenSecret = keyAndValue[1];
+                                    break;
+
+                                case "username":
+                                    args.UserName = keyAndValue[1];
+                                    break;
+
+                                case "subdomain":
+                                    args.SubDomain = keyAndValue[1];
+                                    break;
+
+                                case "homeurl":
+                                    args.HomeUrl = new Uri(HttpUtility.UrlDecode(keyAndValue[1]));
+                                    break;
+                            }
+                        }
+                    }
+                }
+            }
+            else
+            {
+                args.Succeeded = false;
+
+                args.StatusDescription = response.StatusDescription;
+            }
+
+            data.Handler(this, args);
+
+            response.Close();
+        }
+
+        /// <summary>
+        /// Login token response
+        /// </summary>
+        /// <param name="result">the async result</param>
+        private void LoginTokenResponse(IAsyncResult result)
+        {
+            LoginTokenRequestState state = result.AsyncState as LoginTokenRequestState;
+
+            HttpWebRequest request = state.Request;
+
+            var response = request.EndGetResponse(result) as HttpWebResponse;
+
+            if (state.Handler != null)
+            {
+                LogOnRequestEventArgs args = new LogOnRequestEventArgs()
+                {
+                    Succeeded = (response.StatusCode == HttpStatusCode.OK),
+                    StatusDescription = response.StatusDescription
+                };
+
+                if (args.Succeeded)
+                {
+                    using (var stream = response.GetResponseStream())
+                    {
+                        using (var reader = new System.IO.StreamReader(stream))
+                        {
+                            string loginTokenResponse = reader.ReadToEnd();
+
+                            System.Diagnostics.Debug.WriteLine(loginTokenResponse);
+
+                            string[] parameters = loginTokenResponse.Split('&');
+
+                            string oauth_token = null;
+
+                            string next_step = string.Empty;
+
+                            foreach (var parameter in parameters)
+                            {
+                                string[] nameValuePair = parameter.Split('=');
+
+                                switch (nameValuePair[0])
+                                {
+                                    case "oauth_token":
+                                        oauth_token = nameValuePair[1];
+                                        break;
+
+                                    case "oauth_token_secret":
+                                        OAuthTokenSecret = nameValuePair[1];
+                                        break;
+
+                                    case "next_step":
+                                        next_step = Uri.UnescapeDataString(nameValuePair[1]);
+                                        break;
+                                }
+                            }
+
+                            var nextStepUri = string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0}?oauth_token={1}&oauth_token_secret={2}", next_step, oauth_token, OAuthTokenSecret);
+
+                            args.NavigateUri = new Uri(nextStepUri, UriKind.Absolute);
+                        }
+                    }
+                }
+
+                if (state.Handler != null)
+                {
+                    state.Handler(this, args);
+                }
+            }
+
+            response.Close();
+        }
+
+        /// <summary>
+        /// Tags have been returned
+        /// </summary>
+        /// <param name="sender">the sender</param>
+        /// <param name="e">the download string completed event args</param>
+        private void TagsReturned(object sender, DownloadStringCompletedEventArgs e)
+        {
+            var handler = e.UserState as EventHandler<MediaTagsEventArgs>;
+
+            MediaTagsEventArgs args = new MediaTagsEventArgs();
+
+            if (e.Error == null)
+            {
+                XDocument doc = XDocument.Parse(e.Result);
+
+                args.Succeeded = doc.Descendants("status").First().Value == "OK";
+
+                args.Content = from content in doc.Descendants("content")
+                               select new MediaTag
+                               {
+                                   Name = content.Element("name").Value,
+                                   Count = int.Parse(content.Element("count").Value, System.Globalization.CultureInfo.InvariantCulture)
+                               };
+            }
+            else
+            {
+                args.Succeeded = false;
+                args.StatusDescription = e.Error.Message;
+            }
+
+            handler(this, args);
+        }
+
+        /// <summary>
+        /// Media Title download returned
+        /// </summary>
+        /// <param name="sender">the WebClient</param>
+        /// <param name="e">the download string completed event args</param>
+        private void GetMediaTitleCompleted(object sender, DownloadStringCompletedEventArgs e)
+        {
+            EventHandler<GetMediaTitleEventArgs> handler = e.UserState as EventHandler<GetMediaTitleEventArgs>;
+
+            if (e.Error == null)
+            {
+                if (string.IsNullOrEmpty(e.Result))
+                {
+                    GetMediaTitleEventArgs args = new GetMediaTitleEventArgs
+                    {
+                        Succeeded = false,
+                        ErrorMessage = "Invalid Media URL"
+                    };
+
+                    handler(this, args);
+                }
+                else
+                {
+                    XDocument doc = XDocument.Parse(e.Result);
+
+                    var title = doc.Descendants("content").First().Descendants("title").First().Value;
+
+                    GetMediaTitleEventArgs args = new GetMediaTitleEventArgs
+                    {
+                        Succeeded = true,
+                        Title = title
+                    };
+
+                    handler(this, args);
+                }
+            }
+            else
+            {
+                GetMediaTitleEventArgs args = new GetMediaTitleEventArgs
+                {
+                    ErrorMessage = e.Error.Message,
+                    Succeeded = false
+                };
+
+                handler(this, args);
+            }
+        }
+
+        /// <summary>
+        /// Upload Media response
+        /// </summary>
+        /// <param name="result">upload media async result</param>
+        private void GotResponseFromUploadMedia(IAsyncResult result)
+        {
+            UploadResponseState state = result.AsyncState as UploadResponseState;
+
+            try
+            {
+                HttpWebResponse response = state.Request.EndGetResponse(result) as HttpWebResponse;
+
+                if (state.Handler != null)
+                {
+                    UploadEventArgs args = new UploadEventArgs
+                    {
+                        Succeeded = (response.StatusCode == HttpStatusCode.OK),
+                        StatusDescription = response.StatusDescription
+                    };
+
+                    if (args.Succeeded)
+                    {
+                        using (var stream = response.GetResponseStream())
+                        {
+                            using (var reader = new System.IO.StreamReader(stream))
+                            {
+                                string xmlString = reader.ReadToEnd();
+
+                                XDocument doc = XDocument.Parse(xmlString);
+
+                                var content = doc.Descendants("content").First();
+
+                                args.Content = new Media
+                                {
+                                    DescriptionId = content.Attribute("description_id").Value,
+                                    Name = content.Attribute("name").Value,
+                                    Public = int.Parse(content.Attribute("public").Value, System.Globalization.CultureInfo.InvariantCulture),
+                                    UserName = content.Attribute("username").Value,
+                                    UploadDate = UnixTimeToDateTime(content.Attribute("uploaddate").Value),
+                                    BrowseUrl = new Uri(content.Element("browseurl").Value),
+                                    Url = new Uri(content.Element("url").Value),
+                                    Thumb = new Uri(content.Element("thumb").Value),
+                                    Description = content.Element("description").Value,
+                                    Title = content.Element("title").Value
+                                };
+                            }
+                        }
+                    }
+
+                    state.Handler(this, args);
+                }
+
+                response.Close();
+            }
+            catch (System.Net.WebException we)
+            {
+                UploadEventArgs args = new UploadEventArgs
+                {
+                    Succeeded = false,
+                    StatusDescription = we.Message
+                };
+
+                state.Handler(this, args);
+            }
+        }
+
+        /// <summary>
+        /// Response from UploadMedia post
+        /// </summary>
+        /// <param name="result">the async result</param>
+        private void GotRequestStreamForUploadMedia(IAsyncResult result)
+        {
+            UploadData data = result.AsyncState as UploadData;
+
+            string[] parameters = data.RequestUri.Query.Substring(1).Split('&');
+
+            using (var stream = data.WebRequest.EndGetRequestStream(result))
+            {
+                using (System.IO.StreamWriter writer = new System.IO.StreamWriter(stream))
+                {
+                    writer.WriteLine(Boundary);
+
+                    foreach (var nameValue in parameters)
+                    {
+                        var paramNameValue = nameValue.Split('=');
+
+                        writer.WriteLine(ContentDispositionFormat, paramNameValue[0], paramNameValue[1], Boundary);
+                    }
+
+                    /*
+                    writer.WriteLine(ContentDispositionFormat, "oauth-version", "1.0");
+                    writer.WriteLine(Boundary);
+
+
+                    writer.WriteLine(ContentDispositionFormat, "oauth-nonce", nonce);
+                    writer.WriteLine(Boundary);
+
+                    writer.WriteLine(ContentDispositionFormat, "type", data.Type);
+                    writer.WriteLine(Boundary);
+
+                    if (!string.IsNullOrEmpty(data.Title))
+                    {
+                        writer.WriteLine(ContentDispositionFormat, "title", data.Title);
+                        writer.WriteLine(Boundary);
+                    }
+
+                    if (!string.IsNullOrEmpty(data.Description))
+                    {
+                        writer.WriteLine(ContentDispositionFormat, "title", data.Description);
+                        writer.WriteLine(Boundary);
+                    }
+
+                    if (data.Scramble.HasValue)
+                    {
+                        writer.WriteLine("Content-Disposition: form-data; name=\"scramble\" {0}", data.Scramble.Value);
+                        writer.WriteLine(Boundary);
+                    }
+
+                    ////writer.WriteLine("Content-Disposition: form-data; name=\"format\" {0}", "xml");
+                    ////writer.WriteLine(Boundary);
+
+                    if (data.Degrees.HasValue)
+                    {
+                        writer.WriteLine("Content-Disposition: form-data; name=\"degrees\" {0}", data.Degrees.Value);
+                        writer.WriteLine(Boundary);
+                    }
+
+                    if (data.Size.HasValue)
+                    {
+                        writer.WriteLine("Content-Disposition: form-data; name=\"size\" {0}", data.Size.Value);
+                        writer.WriteLine(Boundary);
+                    }
+
+                    ////writer.WriteLine("Content-Disposition: form-data; name=\"format\" {0}", "xml");
+                    ////writer.WriteLine(Boundary);
+                     */
+
+                    writer.WriteLine("Content-Disposition: form-data; name=\"uploadfile\"; filename=\"{0}\" Content-Type:{1}", new object[] { data.FileName, "image/jpg" });
+                    writer.Flush();
+
+                    CopyStream(data.UploadFile, writer.BaseStream);
+
+                    data.UploadFile.Dispose();
+
+                    writer.WriteLine(Boundary);
+
+                    writer.Close();
+                }
+            }
+
+            var responseData = new UploadResponseState { Request = data.WebRequest, Handler = data.Handler };
+
+            var result2 = data.WebRequest.BeginGetResponse(new AsyncCallback(this.GotResponseFromUploadMedia), responseData);
+
+            if (result2.CompletedSynchronously)
+            {
+                this.GotResponseFromUploadMedia(result);
+            }
+        }
+
+        /// <summary>
+        /// Add media tag response
+        /// </summary>
+        /// <param name="result">the async result</param>
+        private void AddMediaTagResponse(IAsyncResult result)
+        {
+            HttpWebRequest request = result.AsyncState as HttpWebRequest;
+
+            request.EndGetResponse(result);
+        }
+
+        /// <summary>
+        /// Search using the WebClient
+        /// </summary>
+        /// <param name="handler">the completed handler</param>
+        /// <param name="uri">the URI to search</param>
+        /// <returns>the WebClient</returns>
+        private System.Net.WebClient SearchUsingWebClient(EventHandler<Photobucket.SearchCompletedEventArgs> handler, Uri uri)
+        {
+            System.Net.WebClient client = new System.Net.WebClient();
+            client.DownloadStringCompleted += new DownloadStringCompletedEventHandler(this.SearchCompleted);
+            client.DownloadStringAsync(uri, handler);
+
+            return client;
+        }
+
+        /// <summary>
+        /// Search has completed
+        /// </summary>
+        /// <param name="sender">Web client</param>
+        /// <param name="e">download string completed</param>
+        private void SearchCompleted(object sender, DownloadStringCompletedEventArgs e)
+        {
+            System.Exception error = e.Error;
+
+            string result = null;
+
+            if (e.Error == null)
+            {
+                result = e.Result;
+            }
+
+            var handler = e.UserState as EventHandler<SearchCompletedEventArgs>;
+
+            ReturnSearchResults(result, error, handler);
+        }
+        #endregion
+
+        #region Classes
+        /// <summary>
+        /// Upload response state
+        /// </summary>
+        private class UploadResponseState
+        {
+            /// <summary>
+            /// Gets or sets the request
+            /// </summary>
+            public HttpWebRequest Request { get; set; }
+
+            /// <summary>
+            /// Gets or sets the upload event handler
+            /// </summary>
+            public EventHandler<UploadEventArgs> Handler { get; set; }
+        }
+
+        /// <summary>
+        /// Login token request state
+        /// </summary>
+        private class LoginTokenRequestState
+        {
+            /// <summary>
+            /// Gets or sets web request
+            /// </summary>
+            public HttpWebRequest Request { get; set; }
+
+            /// <summary>
+            /// Gets or sets handler
+            /// </summary>
+            public EventHandler<LogOnRequestEventArgs> Handler { get; set; }
+        }
+
+        /// <summary>
+        /// Get access token data
+        /// </summary>
+        private class GetAccessTokenData
+        {
+            /// <summary>
+            /// Gets or sets event handler
+            /// </summary>
+            public EventHandler<AccessTokenEventArgs> Handler { get; set; }
+
+            /// <summary>
+            /// Gets or sets web request
+            /// </summary>
+            public HttpWebRequest Request { get; set; }
+        }
+
+        /// <summary>
+        /// Upload Data
+        /// </summary>
+        private class UploadData
+        {
+            /// <summary>
+            /// Gets or sets the request URI
+            /// </summary>
+            public Uri RequestUri { get; set; }
+
+            /// <summary>
+            /// Gets or sets the type
+            /// </summary>
+            public string Type { get; set; }
+
+            /// <summary>
+            /// Gets or sets the upload file
+            /// </summary>
+            public Stream UploadFile { get; set; }
+
+            /// <summary>
+            /// Gets or sets the title
+            /// </summary>
+            public string Title { get; set; }
+
+            /// <summary>
+            /// Gets or sets the description
+            /// </summary>
+            public string Description { get; set; }
+
+            /// <summary>
+            /// Gets or sets the filename
+            /// </summary>
+            public string FileName { get; set; }
+
+            /// <summary>
+            /// Gets or sets whether to Scramble the filename
+            /// </summary>
+            public bool? Scramble { get; set; }
+
+            /// <summary>
+            /// Gets or sets the degrees of rotation
+            /// </summary>
+            public int? Degrees { get; set; }
+
+            /// <summary>
+            /// Gets or sets the size
+            /// </summary>
+            public int? Size { get; set; }
+
+            /// <summary>
+            /// Gets or sets the web request
+            /// </summary>
+            public HttpWebRequest WebRequest { get; set; }
+
+            /// <summary>
+            /// Gets or sets the upload event handler
+            /// </summary>
+            public EventHandler<UploadEventArgs> Handler { get; set; }
+        }
+
+        /// <summary>
+        /// Ping response
+        /// </summary>
+        private class PingResponse
+        {
+            /// <summary>
+            /// Gets or sets the http web request
+            /// </summary>
+            public HttpWebRequest Request { get; set; }
+
+            /// <summary>
+            /// Gets or sets the event handler
+            /// </summary>
+            public EventHandler<HttpWebResponseEventArgs> Handler { get; set; }
+        }
+
+        #endregion
+    }
+}
